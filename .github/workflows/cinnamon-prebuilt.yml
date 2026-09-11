@@ -1,0 +1,146 @@
+# Builds the `cinnamon` branch into the prebuilt LLVM that Cinnamon
+# (https://github.com/tud-ccc/Cinnamon) downloads instead of building LLVM
+# itself. cinnamon/build-prebuilt.sh describes what is published.
+#
+# Every build becomes a release tagged cinnamon-<first 12 digits of the
+# commit>. The tags also keep the commits alive once the branch is rebased, so
+# older Cinnamon revisions can still fetch the LLVM they pin.
+name: Cinnamon prebuilt LLVM
+
+on:
+  push:
+    branches: [cinnamon]
+  workflow_dispatch:
+    inputs:
+      llvm-ref:
+        description: Commit to build, if not the tip of the branch the workflow runs on
+        required: false
+        type: string
+
+permissions:
+  contents: write  # to create releases
+  actions: write   # to delete superseded ccache entries
+
+concurrency:
+  # Only the newest push to the branch matters
+  group: cinnamon-prebuilt-${{ github.ref }}-${{ inputs.llvm-ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  resolve:
+    name: Look for an existing release
+    if: github.repository == 'tud-ccc/cinnamon-llvm'
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.rev.outputs.sha }}
+      tag: ${{ steps.rev.outputs.tag }}
+      published: ${{ steps.rev.outputs.published }}
+    steps:
+      - id: rev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.llvm-ref || github.sha }}
+        run: |
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/commits/$REF" --jq .sha)"
+          tag="cinnamon-${sha:0:12}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::$tag is already published"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build and publish
+    needs: resolve
+    if: needs.resolve.outputs.published != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 4G
+      # pixi installs the compiler with fresh timestamps, which ccache's default
+      # check would take for a different compiler.
+      CCACHE_COMPILERCHECK: content
+      GH_TOKEN: ${{ github.token }}
+      SHA: ${{ needs.resolve.outputs.sha }}
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      # From the branch the workflow runs on, even when building an older
+      # commit, which may predate them.
+      - name: Check out the build scripts
+        uses: actions/checkout@v7
+        with:
+          path: ci
+          sparse-checkout: cinnamon
+          persist-credentials: false
+
+      - name: Check out LLVM
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: llvm
+          persist-credentials: false
+
+      # The build, its ccache and the package do not fit into the space the
+      # runner has free.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          manifest-path: ci/cinnamon/pixi.toml
+          activate-environment: true
+          cache: true
+
+      - name: Restore ccache
+        id: ccache
+        uses: actions/cache/restore@v6
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-${{ needs.resolve.outputs.sha }}
+          restore-keys: ccache-${{ runner.os }}-
+
+      # Leaves the job time to save the cache, so that even a build that times
+      # out speeds up the next one.
+      - name: Build
+        timeout-minutes: 300
+        run: |
+          ccache --zero-stats
+          ci/cinnamon/build-prebuilt.sh llvm build dist
+
+      - name: Show ccache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Save ccache
+        if: always() && steps.ccache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: .ccache
+          key: ${{ steps.ccache.outputs.cache-primary-key }}
+
+      # The newest entries hold everything the next build can use; the older
+      # ones only eat into the repository's cache quota.
+      - name: Delete superseded ccache entries
+        if: always() && steps.ccache.outputs.cache-hit != 'true'
+        run: |
+          gh cache list --repo "$GITHUB_REPOSITORY" --key "ccache-$RUNNER_OS-" \
+              --sort created_at --order desc --limit 100 --json id --jq '.[2:][].id' \
+            | xargs -r -n1 gh cache delete --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish
+        run: |
+          subject="$(git -C llvm log -1 --format=%s)"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          notes="$(printf 'LLVM for [Cinnamon](https://github.com/tud-ccc/Cinnamon), built from %s (%s) by %s.' \
+            "$SHA" "$subject" "$run_url")"
+          gh release create "$TAG" dist/*.tar.zst dist/*.tar.zst.sha256 \
+            --repo "$GITHUB_REPOSITORY" --target "$SHA" \
+            --title "Cinnamon LLVM ${SHA:0:12}" --notes "$notes" \
+            --prerelease --latest=false

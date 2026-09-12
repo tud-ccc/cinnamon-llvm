@@ -38,17 +38,20 @@ python="$(command -v python3)"
 config="$source_dir/cinnamon/llvm-config.cmake"
 [[ -f "$config" ]] || config="$script_dir/llvm-config.cmake"
 
-# The tools built along the way (the tablegens above all) need the pixi
+# -L and -rpath-link: linking a tool against libLLVMSupport makes the linker
+# resolve that library's own dependencies too, and zlib lives in the pixi
+# environment, which it does not search by default.
+# -rpath: the tools built along the way (the tablegens above all) need the pixi
 # toolchain's libstdc++, which is newer than the system's. Once installed, they
 # use the copy bundled below instead.
-env_rpath="-Wl,-rpath,$CONDA_PREFIX/lib"
+env_ld_flags="-L$CONDA_PREFIX/lib -Wl,-rpath-link,$CONDA_PREFIX/lib -Wl,-rpath,$CONDA_PREFIX/lib"
 cmake -S "$source_dir/llvm" -B "$build_dir" -G Ninja -Wno-dev \
   -C "$config" \
   -DLLVM_CCACHE_BUILD=ON \
   -DPython3_EXECUTABLE="$python" \
-  -DCMAKE_EXE_LINKER_FLAGS="$env_rpath" \
-  -DCMAKE_SHARED_LINKER_FLAGS="$env_rpath" \
-  -DCMAKE_MODULE_LINKER_FLAGS="$env_rpath"
+  -DCMAKE_EXE_LINKER_FLAGS="$env_ld_flags" \
+  -DCMAKE_SHARED_LINKER_FLAGS="$env_ld_flags" \
+  -DCMAKE_MODULE_LINKER_FLAGS="$env_ld_flags"
 cmake --build "$build_dir"
 
 rm -rf "$prefix"

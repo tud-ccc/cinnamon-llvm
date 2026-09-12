@@ -1,6 +1,6 @@
 # The environment build-prebuilt.sh builds LLVM in, for Cinnamon
 # (https://github.com/tud-ccc/Cinnamon). It follows the default environment of
-# Cinnamon's pixi.toml: conda-forge's GCC and tools, Python packages from PyPI.
+# Cinnamon's pixi.toml: conda-forge's Clang and tools, Python packages from PyPI.
 [workspace]
 name = "cinnamon-llvm"
 channels = ["conda-forge"]
@@ -14,8 +14,10 @@ cmake = "==4.2.1"
 ninja = "*"
 ccache = "*"
 zstd = "*"
-c-compiler = "*"
-cxx-compiler = "*"
+# Keep in sync with Cinnamon's pixi.toml: what LLVM is built with has to
+# match what links against it.
+clang_linux-64 = "22.*"
+clangxx_linux-64 = "22.*"
 # LLVM's only optional dependency (see llvm-config.cmake)
 zlib = "*"
 
@@ -29,7 +31,7 @@ ml-dtypes = ">=0.5.0, <=0.6.0"
 
 # The compiler packages set no CC/CXX
 [activation.env]
-CC = "$CONDA_PREFIX/bin/gcc"
-CXX = "$CONDA_PREFIX/bin/g++"
+CC = "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-clang"
+CXX = "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-clang++"
 # Make CMake prefer this environment's libraries over the system's
 CMAKE_PREFIX_PATH = "$CONDA_PREFIX"

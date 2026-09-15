@@ -1848,7 +1848,7 @@ OpFoldResult LoadOp::fold(FoldAdaptor adaptor) {
     if (global && global.getConstant() && global.getInitialValue()) {
       auto constIndices = adaptor.getIndices();
       if (llvm::all_of(constIndices, [](auto attr) {
-            return mlir::isa<IntegerAttr>(attr);
+            return mlir::isa_and_present<IntegerAttr>(attr);
           })) {
         SmallVector<uint64_t> index;
         for (auto attr : constIndices) {

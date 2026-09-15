@@ -876,14 +876,14 @@ struct DestructureSingleEltCopy final : public OpRewritePattern<CopyOp> {
         rewriter.setInsertionPoint(copyOp);
         SmallVector<Value> indices;
         if (!ty.getShape().empty()) {
-          Value cst0 = rewriter.create<arith::ConstantOp>(
-              copyOp->getLoc(), rewriter.getIndexAttr(0));
+          Value cst0 =
+              arith::ConstantIndexOp::create(rewriter, copyOp->getLoc(), 0);
           indices.append(ty.getShape().size(), cst0);
         }
-        auto loaded = rewriter.create<memref::LoadOp>(
-            copyOp->getLoc(), copyOp.getSource(), indices);
-        rewriter.create<memref::StoreOp>(copyOp->getLoc(), loaded.getResult(),
-                                         copyOp.getTarget(), indices);
+        auto loaded = memref::LoadOp::create(rewriter, copyOp->getLoc(),
+                                             copyOp.getSource(), indices);
+        memref::StoreOp::create(rewriter, copyOp->getLoc(), loaded.getResult(),
+                                copyOp.getTarget(), indices);
         rewriter.eraseOp(copyOp);
         return success();
       }

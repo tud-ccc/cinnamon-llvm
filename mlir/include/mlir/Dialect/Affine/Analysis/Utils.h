@@ -207,6 +207,17 @@ public:
   // to node 'dstId'. Returns false otherwise. `srcId`, `dstId`, and the
   // operations that the edges connected are expected to be from the same block.
   bool hasDependencePath(unsigned srcId, unsigned dstId) const;
+  // Collects into 'out' every node reachable from any node in 'roots' by
+  // following output edges (if 'forward') or input edges (otherwise). A root
+  // is only added if some path leads back to it. One traversal answers
+  // hasDependencePath for every query sharing an endpoint: the graph's edges
+  // run from earlier to later nodes in block order, so the nodes with a path
+  // to 'dstId' are exactly what this collects backwards from it. A caller
+  // that asks about many sources against one destination -- as loop fusion
+  // does for every candidate it considers -- gets O(1) per query instead of
+  // a traversal each.
+  void collectReachableNodes(ArrayRef<unsigned> roots, bool forward,
+                             DenseSet<unsigned> &out) const;
 
   // Returns the input edge count for node 'id' and 'memref' from src nodes
   // which access 'memref' with a store operation.
@@ -223,8 +234,13 @@ public:
   // Computes and returns an insertion point operation, before which the
   // the fused <srcId, dstId> loop nest can be inserted while preserving
   // dependences. Returns nullptr if no such insertion point is found.
-  Operation *getFusedLoopNestInsertionPoint(unsigned srcId,
-                                            unsigned dstId) const;
+  // 'checkDefiningNodes' asks for the check that no node defining an SSA
+  // value used by 'dstId' depends on 'srcId'. A caller that has already
+  // established that (see collectReachableNodes) passes false to skip the
+  // traversal the check would otherwise repeat per query.
+  Operation *
+  getFusedLoopNestInsertionPoint(unsigned srcId, unsigned dstId,
+                                 bool checkDefiningNodes = true) const;
 
   // Updates edge mappings from node 'srcId' to node 'dstId' after fusing them,
   // taking into account that:

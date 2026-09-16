@@ -588,14 +588,17 @@ bool MemRefDependenceGraph::hasDependencePath(unsigned srcId,
     if (idAndIndex.first == dstId)
       return true;
     // Pop and continue if node has no out edges, or if all out edges have
-    // already been visited.
-    if (!outEdges.contains(idAndIndex.first) ||
-        idAndIndex.second == outEdges.lookup(idAndIndex.first).size()) {
+    // already been visited. Look the edge list up by reference: 'lookup'
+    // returns it by value, and copying it on every step of the traversal
+    // dominated the cost of the whole search.
+    auto outIt = outEdges.find(idAndIndex.first);
+    if (outIt == outEdges.end() ||
+        idAndIndex.second == outIt->second.size()) {
       worklist.pop_back();
       continue;
     }
     // Get graph edge to traverse.
-    const Edge edge = outEdges.lookup(idAndIndex.first)[idAndIndex.second];
+    const Edge edge = outIt->second[idAndIndex.second];
     // Increment next output edge index for 'idAndIndex'.
     ++idAndIndex.second;
     // Add node at 'edge.id' to the worklist. We don't need to consider
@@ -646,23 +649,42 @@ void MemRefDependenceGraph::gatherDefiningNodes(
       definingNodes.insert(edge.id);
 }
 
+void MemRefDependenceGraph::collectReachableNodes(ArrayRef<unsigned> roots,
+                                                  bool forward,
+                                                  DenseSet<unsigned> &out) const {
+  const DenseMap<unsigned, SmallVector<Edge, 2>> &edges =
+      forward ? outEdges : inEdges;
+  SmallVector<unsigned, 8> worklist(roots.begin(), roots.end());
+  while (!worklist.empty()) {
+    unsigned id = worklist.pop_back_val();
+    auto it = edges.find(id);
+    if (it == edges.end())
+      continue;
+    for (const Edge &edge : it->second)
+      if (out.insert(edge.id).second)
+        worklist.push_back(edge.id);
+  }
+}
+
 // Computes and returns an insertion point operation, before which the
 // the fused <srcId, dstId> loop nest can be inserted while preserving
 // dependences. Returns nullptr if no such insertion point is found.
-Operation *
-MemRefDependenceGraph::getFusedLoopNestInsertionPoint(unsigned srcId,
-                                                      unsigned dstId) const {
+Operation *MemRefDependenceGraph::getFusedLoopNestInsertionPoint(
+    unsigned srcId, unsigned dstId, bool checkDefiningNodes) const {
   if (!outEdges.contains(srcId))
     return getNode(dstId)->op;
 
   // Skip if there is any defining node of 'dstId' that depends on 'srcId'.
-  DenseSet<unsigned> definingNodes;
-  gatherDefiningNodes(dstId, definingNodes);
-  if (llvm::any_of(definingNodes,
-                   [&](unsigned id) { return hasDependencePath(srcId, id); })) {
-    LDBG() << "Can't fuse: a defining op with a user in the dst "
-           << "loop has dependence from the src loop";
-    return nullptr;
+  if (checkDefiningNodes) {
+    DenseSet<unsigned> definingNodes;
+    gatherDefiningNodes(dstId, definingNodes);
+    if (llvm::any_of(definingNodes, [&](unsigned id) {
+          return hasDependencePath(srcId, id);
+        })) {
+      LDBG() << "Can't fuse: a defining op with a user in the dst "
+             << "loop has dependence from the src loop";
+      return nullptr;
+    }
   }
 
   // Build set of insts in range (srcId, dstId) which depend on 'srcId'.

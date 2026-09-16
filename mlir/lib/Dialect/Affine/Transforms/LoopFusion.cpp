@@ -874,6 +874,50 @@ public:
     return true;
   }
 
+  /// Reachability around one destination nest, computed once and reused for
+  /// every candidate considered against it.
+  ///
+  /// Every check the drivers below make asks hasDependencePath with the
+  /// destination at one end: can the candidate reach the destination, can the
+  /// destination reach the candidate, can the candidate reach a node defining
+  /// a value the destination uses. Answering each with a fresh traversal made
+  /// a destination cost O(candidates * (V + E)), which on a function of a
+  /// thousand-odd nests never finished. Three traversals per destination
+  /// answer all of them in O(1), and are redone only after a fusion has
+  /// changed the graph. Exactness rests on the graph being a DAG in block
+  /// order (init adds edges only from earlier to later nodes), the same
+  /// property hasDependencePath's own pruning assumes; were an edge ever to
+  /// point backwards, this could only reject more candidates, never accept
+  /// more.
+  struct DstReachability {
+    /// Nodes with a path to the destination.
+    DenseSet<unsigned> ancestors;
+    /// Nodes the destination has a path to.
+    DenseSet<unsigned> descendants;
+    /// Nodes defining an SSA value the destination uses, together with every
+    /// node that has a path to one of them: what
+    /// getFusedLoopNestInsertionPoint's defining-node check tests a source
+    /// against.
+    DenseSet<unsigned> definingOrReachesDefining;
+
+    bool reachesDefiningNodeOf(unsigned srcId) const {
+      return definingOrReachesDefining.contains(srcId);
+    }
+  };
+
+  DstReachability computeDstReachability(unsigned dstId) {
+    DstReachability r;
+    mdg->collectReachableNodes(dstId, /*forward=*/false, r.ancestors);
+    mdg->collectReachableNodes(dstId, /*forward=*/true, r.descendants);
+    DenseSet<unsigned> definingNodes;
+    mdg->gatherDefiningNodes(dstId, definingNodes);
+    SmallVector<unsigned, 4> roots(definingNodes.begin(), definingNodes.end());
+    r.definingOrReachesDefining = std::move(definingNodes);
+    mdg->collectReachableNodes(roots, /*forward=*/false,
+                               r.definingOrReachesDefining);
+    return r;
+  }
+
   /// Perform fusions with node `dstId` as the destination of fusion, with
   /// No fusion is performed when producers with a user count greater than
   /// `maxSrcUserCount` for any of the memrefs involved.
@@ -914,6 +958,9 @@ public:
       SmallVector<unsigned, 16> srcIdCandidates;
       getProducerCandidates(dstId, *mdg, srcIdCandidates);
 
+      // Reachability around 'dstNode', shared by every candidate below and
+      // recomputed only once a fusion has changed the graph.
+      std::optional<DstReachability> reach;
       for (unsigned srcId : llvm::reverse(srcIdCandidates)) {
         // Get 'srcNode' from which to attempt fusion into 'dstNode'.
         auto *srcNode = mdg->getNode(srcId);
@@ -952,9 +999,18 @@ public:
         gatherEscapingMemrefs(srcNode->id, *mdg, srcEscapingMemRefs);
 
         // Compute an operation list insertion point for the fused loop
-        // nest which preserves dependences.
-        Operation *fusedLoopInsPoint =
-            mdg->getFusedLoopNestInsertionPoint(srcNode->id, dstNode->id);
+        // nest which preserves dependences. The defining-node check that
+        // getFusedLoopNestInsertionPoint would make is answered from the
+        // memo instead.
+        if (!reach)
+          reach = computeDstReachability(dstId);
+        if (reach->reachesDefiningNodeOf(srcNode->id)) {
+          LDBG() << "Can't fuse: a defining op with a user in the dst "
+                 << "loop has dependence from the src loop";
+          continue;
+        }
+        Operation *fusedLoopInsPoint = mdg->getFusedLoopNestInsertionPoint(
+            srcNode->id, dstNode->id, /*checkDefiningNodes=*/false);
         if (fusedLoopInsPoint == nullptr)
           continue;
 
@@ -1105,6 +1161,8 @@ public:
         // Update edges between 'srcNode' and 'dstNode'.
         mdg->updateEdges(srcNode->id, dstNode->id, privateMemrefs,
                          removeSrcNode);
+        // The graph changed; the next candidate needs fresh reachability.
+        reach.reset();
 
         // Create private memrefs.
         if (!privateMemrefs.empty()) {
@@ -1206,19 +1264,50 @@ public:
     std::pair<unsigned, Value> idAndMemref;
     auto dstAffineForOp = cast<AffineForOp>(dstNode->op);
 
-    while (findSiblingNodeToFuse(dstNode, &visitedSibNodeIds, &idAndMemref)) {
+    // Reachability around 'dstNode', shared by every candidate below and
+    // recomputed only once a fusion has changed the graph.
+    std::optional<DstReachability> reach;
+    auto findNextSibling = [&] {
+      if (!reach)
+        reach = computeDstReachability(dstNode->id);
+      return findSiblingNodeToFuse(dstNode, &visitedSibNodeIds, &idAndMemref,
+                                   *reach);
+    };
+
+    while (findNextSibling()) {
       unsigned sibId = idAndMemref.first;
       Value memref = idAndMemref.second;
       // TODO: Check that 'sibStoreOpInst' post-dominates all other
       // stores to the same memref in 'sibNode' loop nest.
       auto *sibNode = mdg->getNode(sibId);
       // Compute an operation list insertion point for the fused loop
-      // nest which preserves dependences.
+      // nest which preserves dependences. The source of the fused nest is
+      // whichever of the two comes first in the block; the defining-node
+      // check that getFusedLoopNestInsertionPoint would make is answered
+      // from the memo instead, in the direction that applies.
       assert(sibNode->op->getBlock() == dstNode->op->getBlock());
+      bool sibFirst = sibNode->op->isBeforeInBlock(dstNode->op);
+      bool definingNodeDependence;
+      if (sibFirst) {
+        definingNodeDependence = reach->reachesDefiningNodeOf(sibNode->id);
+      } else {
+        DenseSet<unsigned> sibDefiningNodes;
+        mdg->gatherDefiningNodes(sibNode->id, sibDefiningNodes);
+        definingNodeDependence =
+            llvm::any_of(sibDefiningNodes, [&](unsigned id) {
+              return id == dstNode->id || reach->descendants.contains(id);
+            });
+      }
+      if (definingNodeDependence) {
+        LDBG() << "Can't fuse: a defining op with a user in the dst "
+               << "loop has dependence from the src loop";
+        continue;
+      }
       Operation *insertPointInst =
-          sibNode->op->isBeforeInBlock(dstNode->op)
-              ? mdg->getFusedLoopNestInsertionPoint(sibNode->id, dstNode->id)
-              : mdg->getFusedLoopNestInsertionPoint(dstNode->id, sibNode->id);
+          sibFirst ? mdg->getFusedLoopNestInsertionPoint(
+                         sibNode->id, dstNode->id, /*checkDefiningNodes=*/false)
+                   : mdg->getFusedLoopNestInsertionPoint(
+                         dstNode->id, sibNode->id, /*checkDefiningNodes=*/false);
       if (insertPointInst == nullptr)
         continue;
 
@@ -1356,6 +1445,8 @@ public:
       Operation *op = sibNode->op;
       mdg->removeNode(sibNode->id);
       op->erase();
+      // The graph changed; the next candidate needs fresh reachability.
+      reach.reset();
     }
   }
 
@@ -1365,7 +1456,8 @@ public:
   // 'idAndMemrefToFuse' on success. Returns false otherwise.
   bool findSiblingNodeToFuse(Node *dstNode,
                              DenseSet<unsigned> *visitedSibNodeIds,
-                             std::pair<unsigned, Value> *idAndMemrefToFuse) {
+                             std::pair<unsigned, Value> *idAndMemrefToFuse,
+                             const DstReachability &reach) {
     // Returns true if 'sibNode' can be fused with 'dstNode' for input reuse
     // on 'memref'.
     auto canFuseWithSibNode = [&](Node *sibNode, Value memref) {
@@ -1374,9 +1466,9 @@ public:
       if (sibNode->getLoadOpCount(memref) != 1)
         return false;
       // Skip if there exists a path of dependent edges between
-      // 'sibNode' and 'dstNode'.
-      if (mdg->hasDependencePath(sibNode->id, dstNode->id) ||
-          mdg->hasDependencePath(dstNode->id, sibNode->id))
+      // 'sibNode' and 'dstNode', in either direction.
+      if (reach.ancestors.contains(sibNode->id) ||
+          reach.descendants.contains(sibNode->id))
         return false;
       // Skip sib node if it loads to (and stores from) the same memref on
       // which it also has an input dependence edge.

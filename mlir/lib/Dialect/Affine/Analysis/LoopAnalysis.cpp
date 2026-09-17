@@ -325,8 +325,10 @@ bool mlir::affine::isContiguousAccess(Value iv, LoadOrStoreOp memoryOp,
   assert(memRefDim && "memRefDim == nullptr");
   auto memRefType = memoryOp.getMemRefType();
 
+  // An analysis answers, it does not diagnose: a non-identity layout is an
+  // access this cannot prove contiguous, not an error in the program.
   if (!memRefType.getLayout().isIdentity())
-    return memoryOp.emitError("NYI: non-trivial layout map"), false;
+    return false;
 
   int uniqueVaryingIndexAlongIv = -1;
   auto accessMap = memoryOp.getAffineMap();

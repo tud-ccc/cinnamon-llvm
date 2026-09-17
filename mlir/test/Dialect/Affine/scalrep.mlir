@@ -925,6 +925,38 @@ func.func @reduction_extraction(%x : memref<10x10xf32>) -> f32 {
 }
 
 
+// The loaded accumulator feeds an inner loop: the use inside the nested
+// region has to be redirected to the iter_arg too.
+// CHECK-LABEL: func @reduction_extraction_nested_use
+func.func @reduction_extraction_nested_use(%x : memref<10x10xf32>,
+                                           %y : memref<10x10xf32>) -> f32 {
+  %b = memref.alloc() : memref<f32>
+  %cst = arith.constant 0.0 : f32
+  affine.store %cst, %b[] : memref<f32>
+  affine.for %i0 = 0 to 10 {
+    %acc = affine.load %b[] : memref<f32>
+    affine.for %i1 = 0 to 10 {
+      %v0 = affine.load %x[%i0, %i1] : memref<10x10xf32>
+      %v1 = arith.mulf %acc, %v0 : f32
+      affine.store %v1, %y[%i0, %i1] : memref<10x10xf32>
+    }
+    %v2 = arith.addf %acc, %cst : f32
+    affine.store %v2, %b[] : memref<f32>
+  }
+  %r = affine.load %b[] : memref<f32>
+  return %r : f32
+// CHECK:       %[[I:.*]] = arith.constant 0{{.*}} : f32
+// CHECK:       affine.for %{{.*}} = 0 to 10 iter_args(%[[ACC:.*]] = %[[I]]) -> (f32) {
+// CHECK-NEXT:    affine.for %{{.*}} = 0 to 10 {
+// CHECK-NEXT:      %[[X:.*]] = affine.load %{{.*}} : memref<10x10xf32>
+// CHECK-NEXT:      %[[P:.*]] = arith.mulf %[[ACC]], %[[X]] : f32
+// CHECK-NEXT:      affine.store %[[P]], %{{.*}} : memref<10x10xf32>
+// CHECK-NEXT:    }
+// CHECK-NEXT:    %[[Y:.*]] = arith.addf %[[ACC]], %[[I]] : f32
+// CHECK-NEXT:    affine.yield %[[Y]] : f32
+// CHECK-NEXT:  }
+}
+
 // CHECK-LABEL: func.func @dead_affine_region_op
 func.func @dead_affine_region_op() {
   %c1 = arith.constant 1 : index

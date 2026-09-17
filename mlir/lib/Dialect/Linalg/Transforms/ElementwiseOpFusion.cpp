@@ -2498,8 +2498,22 @@ struct LinalgElementwiseOpFusionPass
       return producer && producer->hasOneUse();
     };
 
+    // Elementwise fusion additionally refuses, when asked to, a fusion that
+    // would recompute the producer: one where the consumer indexes the fused
+    // operand with only some of its loops, so the producer's computation is
+    // repeated once per iteration of the loops the operand does not cover.
+    ControlFusionFn elementwiseControlFn = [&](OpOperand *fusedOperand) {
+      if (!defaultControlFn(fusedOperand))
+        return false;
+      if (fuseWithRecompute)
+        return true;
+      auto consumer = dyn_cast<LinalgOp>(fusedOperand->getOwner());
+      return !consumer || consumer.getMatchingIndexingMap(fusedOperand)
+                                  .getNumResults() == consumer.getNumLoops();
+    };
+
     // Add elementwise op fusion patterns.
-    populateElementwiseOpsFusionPatterns(patterns, defaultControlFn);
+    populateElementwiseOpsFusionPatterns(patterns, elementwiseControlFn);
     populateFoldReshapeOpsByExpansionPatterns(patterns, defaultControlFn);
     tensor::populateBubbleUpExpandShapePatterns(patterns);
 

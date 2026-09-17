@@ -156,6 +156,14 @@ def LinalgFoldUnitExtentDimsPass : Pass<"linalg-fold-unit-extent-dims", ""> {
 
 def LinalgElementwiseOpFusionPass : Pass<"linalg-fuse-elementwise-ops"> {
   let summary = "Fuse elementwise operations on tensors";
+  let options = [
+    Option<"fuseWithRecompute", "fuse-with-recompute", "bool", /*default=*/"true",
+           "Fuse a producer into a consumer operand that is indexed by only "
+           "some of the consumer's loops, which recomputes the producer once "
+           "per iteration of the loops the operand does not cover (the inputs "
+           "of a contraction, a broadcast). When false such producers stay "
+           "separate ops.">
+  ];
   let dependentDialects = [
     "affine::AffineDialect", "linalg::LinalgDialect", "memref::MemRefDialect"
   ];

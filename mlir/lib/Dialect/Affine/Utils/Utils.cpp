@@ -1144,14 +1144,15 @@ static LoopLikeOpInterface findReductionVariablesAndRewrite(
     // replaceWithAdditionalYields may have grown the yield's OperandStorage
     // (realloc + move), which rebuilds the use-chain and can leave stale
     // back-pointers that crash removeFromCurrent. Instead, walk the loop body
-    // ops and patch operands in place.
+    // ops -- nested regions included, the value may feed an inner loop -- and
+    // patch operands in place.
     Value loadResult = load->getResult(0);
-    for (Operation &bodyOp : newLoop.getLoopRegions()[0]->front()) {
-      for (OpOperand &operand : bodyOp.getOpOperands()) {
+    newLoop.getLoopRegions()[0]->walk([&](Operation *bodyOp) {
+      for (OpOperand &operand : bodyOp->getOpOperands()) {
         if (operand.get() == loadResult)
           operand.set(bbArg);
       }
-    }
+    });
     rewriter.eraseOp(load);
 
     auto store = loadStore.second;

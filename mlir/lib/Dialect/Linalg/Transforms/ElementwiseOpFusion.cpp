@@ -2476,6 +2476,19 @@ void mlir::linalg::populateCollapseDimensions(
 
 namespace {
 
+/// Whether `op`'s body computes nothing: it consists of the terminator alone,
+/// yielding block arguments (elements of its operands) or values defined
+/// outside the body (a scalar being filled in). That is a broadcast, a
+/// transpose, a copy or a fill, whichever way the indexing maps are laid out.
+static bool isDataMovementOnly(LinalgOp op) {
+  Block &body = op->getRegion(0).front();
+  if (!llvm::hasSingleElement(body))
+    return false;
+  return llvm::all_of(body.getTerminator()->getOperands(), [&](Value v) {
+    return isa<BlockArgument>(v) || v.getParentRegion() != &op->getRegion(0);
+  });
+}
+
 /// Pass that fuses generic ops on tensors. Used only for testing.
 // TODO(ravishankarm): This pass is to be deprecated. The efficacy of the
 // patterns added here heavily depends on the cost function used. Having an
@@ -2498,8 +2511,31 @@ struct LinalgElementwiseOpFusionPass
       return producer && producer->hasOneUse();
     };
 
+    // Elementwise fusion additionally refuses, when asked to, a fusion that
+    // would recompute the producer: one where the consumer indexes the fused
+    // operand with only some of its loops, so the producer's computation is
+    // repeated once per iteration of the loops the operand does not cover.
+    // A producer that computes nothing -- a broadcast, a transpose, a copy, a
+    // fill, whose body only yields an input or a value from outside -- has
+    // nothing to recompute: fused, it costs the consumer the load it would
+    // have done anyway, while unfused it materializes a whole tensor. Those
+    // are fused regardless.
+    ControlFusionFn elementwiseControlFn = [&](OpOperand *fusedOperand) {
+      if (!defaultControlFn(fusedOperand))
+        return false;
+      if (fuseWithRecompute)
+        return true;
+      auto consumer = dyn_cast<LinalgOp>(fusedOperand->getOwner());
+      if (!consumer || consumer.getMatchingIndexingMap(fusedOperand)
+                               .getNumResults() == consumer.getNumLoops())
+        return true;
+      auto producer =
+          dyn_cast<LinalgOp>(fusedOperand->get().getDefiningOp());
+      return producer && isDataMovementOnly(producer);
+    };
+
     // Add elementwise op fusion patterns.
-    populateElementwiseOpsFusionPatterns(patterns, defaultControlFn);
+    populateElementwiseOpsFusionPatterns(patterns, elementwiseControlFn);
     populateFoldReshapeOpsByExpansionPatterns(patterns, defaultControlFn);
     tensor::populateBubbleUpExpandShapePatterns(patterns);
 

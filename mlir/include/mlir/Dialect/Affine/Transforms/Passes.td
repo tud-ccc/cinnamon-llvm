@@ -357,6 +357,70 @@ def AffineScalarReplacement : AffineScopePass<"affine-scalrep"> {
   ];
 }
 
+def AffineFactorReductionScale : Pass<"affine-factor-reduction-scale"> {
+  let summary = "Hoist a loop-invariant factor out of a reduction loop";
+  let description = [{
+    Rewrites a reduction carried by an `affine.for` iteration argument whose
+    every term is scaled by the same loop-invariant value `s`:
+
+    ```mlir
+    %r = affine.for %k = 0 to 64 iter_args(%acc = %init) -> (i32) {
+      %a = affine.load %A[%k] : memref<64xi32>
+      %x = affine.load %X[%k] : memref<64xi32>
+      %xs = arith.muli %x, %s : i32
+      %t = arith.muli %a, %xs : i32
+      %next = arith.addi %acc, %t : i32
+      affine.yield %next : i32
+    }
+    ```
+
+    into a loop that sums the unscaled terms, starting from the identity,
+    with the scale applied once after it:
+
+    ```mlir
+    %zero = arith.constant 0 : i32
+    %r = affine.for %k = 0 to 64 iter_args(%acc = %zero) -> (i32) {
+      %a = affine.load %A[%k] : memref<64xi32>
+      %x = affine.load %X[%k] : memref<64xi32>
+      %t = arith.muli %a, %x : i32
+      %next = arith.addi %acc, %t : i32
+      affine.yield %next : i32
+    }
+    %rs = arith.muli %r, %s : i32
+    %total = arith.addi %init, %rs : i32
+    ```
+
+    A term is `x * s` or `a * (x * s)` in any operand order, and one
+    iteration may add several terms, all scaled by the same `s`. `s` is
+    loop-invariant when it is defined outside the loop, or loaded in the body
+    from a loop-invariant address that nothing in the loop may write; that
+    load is then repeated after the loop.
+
+    This saves a multiply per term. It also keeps a later unroll from
+    producing a sum that only a reassociation can shorten: fully unrolled,
+    the original loop is a chain the code generator's own reassociation
+    factors `s` out of -- summing every product at the root, after the last,
+    so that all of them are live at once.
+
+    The rewrite reassociates the sum. Integer addition and multiplication
+    are exact modulo 2^n, so integer reductions are always rewritten;
+    floating-point ones only with `allow-float-reassociation`, or when every
+    `arith.addf` and `arith.mulf` involved carries the `reassoc` fast-math
+    flag, and only for a loop known to run at least once.
+
+    Reductions through memory -- a load and a store of the same address in
+    the body -- are not matched; `affine-scalrep` promotes those to iteration
+    arguments first.
+  }];
+  let options = [
+    Option<"allowFloatReassociation", "allow-float-reassociation", "bool",
+           /*default=*/"false",
+           "Rewrite floating-point reductions whose ops do not carry the "
+           "`reassoc` fast-math flag">
+  ];
+  let dependentDialects = ["arith::ArithDialect"];
+}
+
 def AffineVectorize : AffineScopePass<"affine-super-vectorize"> {
   let summary = "Vectorize to a target independent n-D vector abstraction";
   let dependentDialects = ["vector::VectorDialect"];

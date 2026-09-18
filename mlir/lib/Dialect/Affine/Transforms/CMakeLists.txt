@@ -18,6 +18,7 @@ add_mlir_dialect_library(MLIRAffineTransforms
   RaiseMemrefDialect.cpp
   ReifyValueBounds.cpp
   SuperVectorize.cpp
+  FactorReductionScale.cpp
   SimplifyAffineWithBounds.cpp
   SimplifyAffineStructures.cpp
   SimplifyAffineMinMax.cpp

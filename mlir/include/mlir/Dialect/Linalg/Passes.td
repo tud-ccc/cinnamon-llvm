@@ -162,9 +162,16 @@ def LinalgElementwiseOpFusionPass : Pass<"linalg-fuse-elementwise-ops"> {
            "some of the consumer's loops, which recomputes the producer once "
            "per iteration of the loops the operand does not cover (the inputs "
            "of a contraction). When false such producers stay separate ops, "
-           "except those that compute nothing -- a broadcast, a transpose, a "
-           "copy, a fill -- which have nothing to recompute and are fused "
-           "either way.">
+           "except those cheap enough to recompute, see "
+           "max-recompute-body-ops.">,
+    Option<"maxRecomputeBodyOps", "max-recompute-body-ops", "unsigned",
+           /*default=*/"1",
+           "With fuse-with-recompute=false, a producer whose body holds at "
+           "most this many side-effect-free ops besides its yield is fused "
+           "anyway. Zero admits what computes nothing -- a broadcast, a "
+           "transpose, a copy, a fill; one also admits a single scalar op such "
+           "as the scaling of a vector, which a consumer redoes for less than "
+           "materializing the result costs.">
   ];
   let dependentDialects = [
     "affine::AffineDialect", "linalg::LinalgDialect", "memref::MemRefDialect"

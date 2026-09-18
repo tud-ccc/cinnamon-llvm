@@ -2476,17 +2476,22 @@ void mlir::linalg::populateCollapseDimensions(
 
 namespace {
 
-/// Whether `op`'s body computes nothing: it consists of the terminator alone,
-/// yielding block arguments (elements of its operands) or values defined
-/// outside the body (a scalar being filled in). That is a broadcast, a
-/// transpose, a copy or a fill, whichever way the indexing maps are laid out.
-static bool isDataMovementOnly(LinalgOp op) {
+/// Whether recomputing `op` per use is cheap: its body holds at most
+/// `maxBodyOps` side-effect-free ops besides the terminator. At zero that is
+/// a broadcast, a transpose, a copy or a fill -- a yield of an operand
+/// element or of a value from outside -- which computes nothing; at one it
+/// is also a single scalar op such as the scaling of a vector, which a
+/// consumer redoes for less than it costs to materialize the result.
+static bool isCheapToRecompute(LinalgOp op, unsigned maxBodyOps) {
   Block &body = op->getRegion(0).front();
-  if (!llvm::hasSingleElement(body))
-    return false;
-  return llvm::all_of(body.getTerminator()->getOperands(), [&](Value v) {
-    return isa<BlockArgument>(v) || v.getParentRegion() != &op->getRegion(0);
-  });
+  unsigned ops = 0;
+  for (Operation &inner : body.without_terminator()) {
+    if (inner.getNumRegions() > 0 || !isMemoryEffectFree(&inner))
+      return false;
+    if (++ops > maxBodyOps)
+      return false;
+  }
+  return true;
 }
 
 /// Pass that fuses generic ops on tensors. Used only for testing.
@@ -2515,11 +2520,12 @@ struct LinalgElementwiseOpFusionPass
     // would recompute the producer: one where the consumer indexes the fused
     // operand with only some of its loops, so the producer's computation is
     // repeated once per iteration of the loops the operand does not cover.
-    // A producer that computes nothing -- a broadcast, a transpose, a copy, a
-    // fill, whose body only yields an input or a value from outside -- has
-    // nothing to recompute: fused, it costs the consumer the load it would
-    // have done anyway, while unfused it materializes a whole tensor. Those
-    // are fused regardless.
+    // A producer cheap enough to recompute -- one that computes nothing (a
+    // broadcast, a transpose, a copy, a fill) or a single scalar op such as
+    // the scaling of a vector -- is fused regardless: fused, it costs the
+    // consumer little more than the load it would have done anyway, while
+    // unfused it materializes a whole tensor that is then distributed and
+    // read back. `maxRecomputeBodyOps` draws that line.
     ControlFusionFn elementwiseControlFn = [&](OpOperand *fusedOperand) {
       if (!defaultControlFn(fusedOperand))
         return false;
@@ -2531,7 +2537,7 @@ struct LinalgElementwiseOpFusionPass
         return true;
       auto producer =
           dyn_cast<LinalgOp>(fusedOperand->get().getDefiningOp());
-      return producer && isDataMovementOnly(producer);
+      return producer && isCheapToRecompute(producer, maxRecomputeBodyOps);
     };
 
     // Add elementwise op fusion patterns.
